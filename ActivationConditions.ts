@@ -5,6 +5,7 @@ import { HorseParameters, Strategy, StrategyHelpers } from './HorseTypes';
 import { Region, RegionList } from './Region';
 import { RaceState, DynamicCondition } from './RaceSolver';
 import { RaceParameters } from './RaceParameters';
+import { compareRank, RankComparison } from './Rank';
 import {
 	ActivationSamplePolicy,
 	ImmediatePolicy, RandomPolicy,
@@ -285,9 +286,15 @@ function valueFilter(getValue: (c: CourseData, h: HorseParameters, e: RaceParame
 	});
 }
 
-function orderFilter(getPos: (arg: number, n: number) => number) {
+function orderFilter(getPos: (arg: number, n: number) => number, percentage = false) {
+	function dynamic(regions: RegionList, arg: number, extra: RaceParameters, comparison: RankComparison) {
+		if (!extra.rankAware) return null;
+		return [regions, (state: RaceState) => compareRank(state.rank, comparison, arg, state.fieldSize, percentage)] as [RegionList, DynamicCondition];
+	}
 	return immediate({
 		filterEq(regions: RegionList, arg: number, _0: CourseData, _1: HorseParameters, extra: RaceParameters) {
+			const runtime = dynamic(regions, arg, extra, 'eq');
+			if (runtime != null) return runtime;
 			if (extra.orderRange != null) {
 				const pos = getPos(arg, extra.numUmas);
 				return pos >= extra.orderRange[0] && pos <= extra.orderRange[1] ? regions : new RegionList();
@@ -295,6 +302,8 @@ function orderFilter(getPos: (arg: number, n: number) => number) {
 			return regions;
 		},
 		filterNeq(regions: RegionList, arg: number, _0: CourseData, _1: HorseParameters, extra: RaceParameters) {
+			const runtime = dynamic(regions, arg, extra, 'neq');
+			if (runtime != null) return runtime;
 			if (extra.orderRange != null) {
 				const pos = getPos(arg, extra.numUmas);
 				return pos < extra.orderRange[0] || pos > extra.orderRange[1] ? regions : new RegionList();
@@ -302,6 +311,8 @@ function orderFilter(getPos: (arg: number, n: number) => number) {
 			return regions;
 		},
 		filterLt(regions: RegionList, arg: number, course: CourseData, _: HorseParameters, extra: RaceParameters) {
+			const runtime = dynamic(regions, arg, extra, 'lt');
+			if (runtime != null) return runtime;
 			if (extra.orderRange != null) {
 				assert(1 <= extra.orderRange[0] && extra.orderRange[0] <= extra.orderRange[1]);
 				// ignore forward order conditions in the last leg (important for e.g. NY Opera unique)
@@ -314,6 +325,8 @@ function orderFilter(getPos: (arg: number, n: number) => number) {
 			return regions;
 		},
 		filterLte(regions: RegionList, arg: number, course: CourseData, _: HorseParameters, extra: RaceParameters) {
+			const runtime = dynamic(regions, arg, extra, 'lte');
+			if (runtime != null) return runtime;
 			if (extra.orderRange != null) {
 				assert(1 <= extra.orderRange[0] && extra.orderRange[0] <= extra.orderRange[1]);
 				const end = new Region(CourseHelpers.phaseStart(course.distance, 2) + 100, course.distance);
@@ -323,6 +336,8 @@ function orderFilter(getPos: (arg: number, n: number) => number) {
 			return regions;
 		},
 		filterGt(regions: RegionList, arg: number, _0: CourseData, _1: HorseParameters, extra: RaceParameters) {
+			const runtime = dynamic(regions, arg, extra, 'gt');
+			if (runtime != null) return runtime;
 			if (extra.orderRange != null) {
 				assert(extra.orderRange[0] <= extra.orderRange[1] && extra.orderRange[1] <= extra.numUmas);
 				const pos = getPos(arg, extra.numUmas);
@@ -331,6 +346,8 @@ function orderFilter(getPos: (arg: number, n: number) => number) {
 			return regions;
 		},
 		filterGte(regions: RegionList, arg: number, _0: CourseData, _1: HorseParameters, extra: RaceParameters) {
+			const runtime = dynamic(regions, arg, extra, 'gte');
+			if (runtime != null) return runtime;
 			if (extra.orderRange != null) {
 				assert(extra.orderRange[0] <= extra.orderRange[1] && extra.orderRange[1] <= extra.numUmas);
 				const pos = getPos(arg, extra.numUmas);
@@ -345,6 +362,10 @@ function orderInFilter(rate: number) {
 	return immediate({
 		filterEq(regions: RegionList, one: number, _0: CourseData, _1: HorseParameters, extra: RaceParameters) {
 			assert(one == 1, 'must be order_rate_inXX_continue==1');
+			if (extra.rankAware) {
+				const threshold = Math.round(rate * (extra.numUmas || 1));
+				return [regions, (state: RaceState) => state.worstFieldRank <= threshold] as [RegionList, DynamicCondition];
+			}
 			if (extra.orderRange != null) {
 				assert(1 <= extra.orderRange[0] && extra.orderRange[0] <= extra.orderRange[1]);
 				return extra.orderRange[0] <= Math.round(rate * extra.numUmas) ? regions : new RegionList();
@@ -358,6 +379,10 @@ function orderOutFilter(rate: number) {
 	return immediate({
 		filterEq(regions: RegionList, one: number, _0: CourseData, _1: HorseParameters, extra: RaceParameters) {
 			assert(one == 1, 'must be order_rate_outXX_continue==1');
+			if (extra.rankAware) {
+				const threshold = Math.round(rate * (extra.numUmas || 1));
+				return [regions, (state: RaceState) => state.bestFieldRank >= threshold] as [RegionList, DynamicCondition];
+			}
 			if (extra.orderRange != null) {
 				assert(extra.orderRange[0] <= extra.orderRange[1] && extra.orderRange[1] <= extra.numUmas);
 				return Math.round(rate * extra.numUmas) <= extra.orderRange[1] ? regions : new RegionList();
@@ -779,7 +804,7 @@ export const Conditions: {[cond: string]: Condition} = Object.freeze({
 	motivation: valueFilter((_0: CourseData, _1: HorseParameters, extra: RaceParameters) => extra.mood + 3),  // go from -2 to 2 to 1-5 scale
 	near_count: noopErlangRandom(3, 2.0),
 	order: orderFilter((pos: number, _: number) => pos),
-	order_rate: orderFilter((rate: number, numUmas: number) => Math.round(numUmas * (rate / 100.0))),
+	order_rate: orderFilter((rate: number, numUmas: number) => Math.round(numUmas * (rate / 100.0)), true),
 	order_rate_in20_continue: orderInFilter(0.2),
 	order_rate_in40_continue: orderInFilter(0.4),
 	order_rate_in80_continue: orderInFilter(0.8),
@@ -1051,3 +1076,55 @@ export const Conditions: {[cond: string]: Condition} = Object.freeze({
 	visiblehorse: noopImmediate,
 	weather: valueFilter((_0: CourseData, _1: HorseParameters, extra: RaceParameters) => extra.weather)
 });
+
+function dynamicValueFilter(getValue: (state: RaceState) => number): Condition {
+	function dynamic(regions: RegionList, value: number, comparison: (a: number, b: number) => boolean) {
+		return [regions, (state: RaceState) => comparison(getValue(state), value)] as [RegionList, DynamicCondition];
+	}
+	return immediate({
+		filterEq: (r, v) => dynamic(r, v, (a,b) => a == b),
+		filterNeq: (r, v) => dynamic(r, v, (a,b) => a != b),
+		filterLt: (r, v) => dynamic(r, v, (a,b) => a < b),
+		filterLte: (r, v) => dynamic(r, v, (a,b) => a <= b),
+		filterGt: (r, v) => dynamic(r, v, (a,b) => a > b),
+		filterGte: (r, v) => dynamic(r, v, (a,b) => a >= b)
+	});
+}
+
+/** Conditions used only by the shared-clock field simulator. Lane-qualified conditions
+ *  intentionally use longitudinal necessary conditions supplied by FieldState.ts. */
+export const FieldConditions: {[cond: string]: Condition} = Object.freeze(Object.assign({}, Conditions, {
+	bashin_diff_behind: dynamicValueFilter(s => s.nearestBehindDistance / 2.5),
+	bashin_diff_infront: dynamicValueFilter(s => s.nearestAheadDistance / 2.5),
+	behind_near_lane_time: dynamicValueFilter(s => s.behindNearLaneTime),
+	behind_near_lane_time_set1: dynamicValueFilter(s => s.behindNearLaneTimeSet1),
+	blocked_all_continuetime: dynamicValueFilter(s => s.blockedAllTime),
+	blocked_front: dynamicValueFilter(s => +s.blockedFront),
+	blocked_front_continuetime: dynamicValueFilter(s => s.blockedFrontTime),
+	blocked_side_continuetime: dynamicValueFilter(s => s.blockedSideTime),
+	change_order_onetime: dynamicValueFilter(s => s.changeOrderOneTime),
+	change_order_up_end_after: dynamicValueFilter(s => s.changeOrderUpEndAfter),
+	change_order_up_finalcorner_after: dynamicValueFilter(s => s.changeOrderUpFinalCornerAfter),
+	change_order_up_middle: dynamicValueFilter(s => s.changeOrderUpMiddle),
+	distance_diff_rate: dynamicValueFilter(s => s.fieldSpread > 0 ? s.distanceFromLeader / s.fieldSpread * 100 : 0),
+	distance_diff_top: dynamicValueFilter(s => Math.floor(s.distanceFromLeader)),
+	distance_diff_top_float: dynamicValueFilter(s => Math.floor(s.distanceFromLeader * 10)),
+	infront_near_lane_time: dynamicValueFilter(s => s.infrontNearLaneTime),
+	is_behind_in: dynamicValueFilter(s => +s.isBehindIn),
+	is_move_lane: dynamicValueFilter(s => s.laneMovementType),
+	is_overtake: dynamicValueFilter(s => +s.hasOvertakeTarget),
+	is_surrounded: dynamicValueFilter(s => +s.isSurrounded),
+	near_count: dynamicValueFilter(s => s.nearCount),
+	overtake_target_no_order_up_time: dynamicValueFilter(s => s.overtakeTargetNoOrderUpTime),
+	overtake_target_time: dynamicValueFilter(s => s.overtakeTargetTime),
+	running_style_count_same: dynamicValueFilter(s => s.sameStrategyCount),
+	running_style_count_same_rate: dynamicValueFilter(s => s.sameStrategyRate),
+	running_style_equal_popularity_one: dynamicValueFilter(s => +s.popularityOneSameStrategy),
+	visiblehorse: dynamicValueFilter(s => s.visibleHorseCount),
+	// In these debuff conditions the named strategy belongs to the eventual target, not the skill owner.
+	// The field effect router applies the strategy predicate when selecting targets.
+	running_style_count_nige_otherself: noopImmediate,
+	running_style_count_senko_otherself: noopImmediate,
+	running_style_count_sashi_otherself: noopImmediate,
+	running_style_count_oikomi_otherself: noopImmediate
+}));

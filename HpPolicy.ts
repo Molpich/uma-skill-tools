@@ -8,6 +8,7 @@ export interface HpPolicy {
 	init(horse: HorseParameters): void
 	tick(state: RaceState, dt: number): void
 	hasRemainingHp(): boolean
+	remainingHp(): number
 	hpRatioRemaining(): number  // separate methods as the former can be much cheaper to check
 	recover(modifier: number): void
 	getLastSpurtPair(state: RaceState, maxSpeed: number, baseTargetSpeed2: number): [number, number]
@@ -17,6 +18,7 @@ export const NoopHpPolicy: HpPolicy = {
 	init(_: HorseParameters) {},
 	tick(_0: RaceState, _1: number) {},
 	hasRemainingHp() { return true; },
+	remainingHp() { return Infinity; },
 	hpRatioRemaining() { return 1.0; },
 	recover(_: number) {},
 	getLastSpurtPair(_0: RaceState, maxSpeed: number, _1: number) { return [-1, maxSpeed] as [number, number]; }
@@ -84,6 +86,10 @@ export class GameHpPolicy {
 
 	hasRemainingHp() {
 		return this.hp > 0.0;
+	}
+
+	remainingHp() {
+		return this.hp;
 	}
 
 	hpRatioRemaining() {
