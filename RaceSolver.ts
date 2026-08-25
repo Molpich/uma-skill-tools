@@ -119,6 +119,42 @@ export interface RaceState {
 	readonly temptationCount: number
 	readonly phase: Phase
 	readonly pos: number
+	readonly rank: number
+	readonly fieldSize: number
+	/** Best (lowest-numbered) and worst (highest-numbered) live field ranks seen so far. */
+	readonly bestFieldRank: number
+	readonly worstFieldRank: number
+	readonly fieldRankHistoryStarted: boolean
+	readonly nearestAheadDistance: number
+	readonly nearestBehindDistance: number
+	readonly distanceFromLeader: number
+	readonly distanceFromLast: number
+	readonly fieldSpread: number
+	readonly nearCount: number
+	readonly visibleHorseCount: number
+	readonly blockedFront: boolean
+	readonly lanePosition: number
+	readonly laneTarget: number
+	readonly laneSpeed: number
+	readonly blockedFrontTime: number
+	readonly blockedSideTime: number
+	readonly blockedAllTime: number
+	readonly infrontNearLaneTime: number
+	readonly behindNearLaneTime: number
+	readonly behindNearLaneTimeSet1: number
+	readonly isSurrounded: boolean
+	readonly hasOvertakeTarget: boolean
+	readonly overtakeTargetTime: number
+	readonly overtakeTargetNoOrderUpTime: number
+	readonly changeOrderOneTime: number
+	readonly changeOrderUpMiddle: number
+	readonly changeOrderUpEndAfter: number
+	readonly changeOrderUpFinalCornerAfter: number
+	readonly laneMovementType: number
+	readonly sameStrategyCount: number
+	readonly sameStrategyRate: number
+	readonly popularityOneSameStrategy: boolean
+	readonly isBehindIn: boolean
 	readonly hp: Readonly<HpPolicy>
 	readonly randomLot: number
 	readonly startDelay: number
@@ -160,6 +196,13 @@ export interface SkillEffect {
 	type: SkillType
 	baseDuration: number
 	modifier: number
+	/** Game ability-time usage. 1 is ordinary course-distance scaling. */
+	durationScaling?: number
+}
+
+export interface FieldSkillEffect extends SkillEffect {
+	target: number
+	targetStrategy?: number
 }
 
 export interface PendingSkill {
@@ -168,7 +211,13 @@ export interface PendingSkill {
 	rarity: SkillRarity
 	trigger: Region
 	extraCondition: DynamicCondition
+	preconditionRegions?: Region[]
+	precondition?: DynamicCondition
+	preconditionFulfilled?: boolean
 	effects: SkillEffect[]
+	/** Selects the applicable effect variant after the trigger has fired. */
+	effectResolver?: (state: RaceState) => SkillEffect[]
+	fieldEffects?: FieldSkillEffect[]
 }
 
 interface ActiveSkill {
@@ -178,11 +227,127 @@ interface ActiveSkill {
 	modifier: number
 }
 
+/**
+ * A skill-specific live event rule.  The skill data does not currently expose
+ * this information, so keep the small exceptional set here rather than
+ * pretending that a normal activation condition can describe it.
+ */
+export type RaceEventType = 'overtake' | 'overtaken' | 'skillActivated';
+
+export interface RaceEvent {
+	type: RaceEventType
+	count?: number
+	/** Present for skill-activation events so subscribers can distinguish source skills and perspectives. */
+	skillId?: string
+	perspective?: Perspective
+}
+
+/** Rules subscribed by a skill while it is active, independent of any event's meaning. */
+interface ActiveSkillEventRule {
+	event: RaceEventType
+	maxTriggers: number
+	/** Optional source-aware filter for events of the subscribed type. */
+	matches?: (event: RaceEvent, activeSkillId: string, activePerspective?: Perspective) => boolean
+	/** Effects present when the skill initially activates. */
+	initialEffects: (effects: SkillEffect[]) => SkillEffect[]
+	/** Effects added for each pass that happens while the skill is active. */
+	effectsPerTrigger: (effects: SkillEffect[]) => SkillEffect[]
+	/** Add one base skill duration per trigger. */
+	extendDurationByBase: boolean
+}
+
+const ActiveSkillEventRules: Readonly<Record<string, ActiveSkillEventRule>> = Object.freeze({
+	// Bamboo Memory's unique stores its initial and per-pass acceleration
+	// effects as two otherwise-identical entries in the extracted game data.
+	// The second entry is not active until an overtake occurs.
+	'100531': {
+		event: 'overtake',
+		maxTriggers: 3,
+		initialEffects: effects => effects.slice(0, 1),
+		effectsPerTrigger: effects => effects.slice(1, 2),
+		extendDurationByBase: true
+	},
+	'900531': {
+		event: 'overtake',
+		maxTriggers: 3,
+		initialEffects: effects => effects.slice(0, 1),
+		effectsPerTrigger: effects => effects.slice(1, 2),
+		extendDurationByBase: true
+	},
+	// Dream Deliverer Winning Ticket: the extracted entries are the initial
+	// target-speed boost and the boost granted by each other self-skill that
+	// activates during this unique. The duration itself does not extend.
+	'110351': {
+		event: 'skillActivated',
+		maxTriggers: 3,
+		matches: (event, skillId, perspective) => event.perspective == perspective && event.skillId != skillId,
+		initialEffects: effects => effects.slice(0, 1),
+		effectsPerTrigger: effects => effects.slice(1, 2),
+		extendDurationByBase: false
+	},
+	'910351': {
+		event: 'skillActivated',
+		maxTriggers: 3,
+		matches: (event, skillId, perspective) => event.perspective == perspective && event.skillId != skillId,
+		initialEffects: effects => effects.slice(0, 1),
+		effectsPerTrigger: effects => effects.slice(1, 2),
+		extendDurationByBase: false
+	}
+});
+
+interface ActiveSkillEventSubscription {
+	skillId: string
+	perspective?: Perspective
+	rule: ActiveSkillEventRule
+	durationTimer: Timer
+	baseDuration: number
+	triggers: number
+	effects: SkillEffect[]
+}
+
 function noop(x: unknown) {}
 
 export class RaceSolver {
 	accumulatetime: Timer
 	pos: number
+	rank: number
+	fieldSize: number
+	bestFieldRank: number
+	worstFieldRank: number
+	fieldRankHistoryStarted: boolean
+	nearestAheadDistance: number
+	nearestBehindDistance: number
+	distanceFromLeader: number
+	distanceFromLast: number
+	fieldSpread: number
+	nearCount: number
+	visibleHorseCount: number
+	blockedFront: boolean
+	/** Continuous lateral position, target, and speed in horse-width units. */
+	lanePosition: number
+	laneTarget: number
+	laneSpeed: number
+	laneInitialized: boolean
+	blockedFrontTime: number
+	blockedSideTime: number
+	blockedAllTime: number
+	infrontNearLaneTime: number
+	behindNearLaneTime: number
+	behindNearLaneTimeSet1: number
+	isSurrounded: boolean
+	hasOvertakeTarget: boolean
+	overtakeTargetTime: number
+	overtakeTargetNoOrderUpTime: number
+	lastFieldRank: number
+	changeOrderOneTime: number
+	changeOrderUpMiddle: number
+	changeOrderUpEndAfter: number
+	changeOrderUpFinalCornerAfter: number
+	laneMovementType: number
+	sameStrategyCount: number
+	sameStrategyRate: number
+	popularityOneSameStrategy: boolean
+	isBehindIn: boolean
 	minSpeed: number
 	currentSpeed: number
 	targetSpeed: number
@@ -210,9 +375,15 @@ export class RaceSolver {
 	activeTargetSpeedSkills: ActiveSkill[]
 	activeCurrentSpeedSkills: (ActiveSkill & {naturalDeceleration: boolean})[]
 	activeAccelSkills: ActiveSkill[]
+	/** Live subscriptions are deliberately separate from historic condition counters. */
+	activeSkillEventSubscriptions: ActiveSkillEventSubscription[]
+	/** Compact event history enables future time-window/count conditions. */
+	raceEvents: {type: RaceEventType, count: number, time: number}[]
 	pendingSkills: PendingSkill[]
 	pendingRemoval: Set<string>
 	usedSkills: Set<string>
+	/** Green/passive skills that actually activated at the gate. */
+	activatedPassiveSkills: Set<string>
 	nHills: number
 	hillIdx: number
 	slopePer: number
@@ -223,7 +394,7 @@ export class RaceSolver {
 	activateCount: number[]
 	activateCountHeal: number
 	activateCountLastFrame: number
-	onSkillActivate: (s: RaceSolver, skillId: string, perspective: Perspective) => void
+	onSkillActivate: (s: RaceSolver, skillId: string, perspective: Perspective, skill?: PendingSkill) => void
 	onSkillDeactivate: (s: RaceSolver, skillId: string, perspective: Perspective) => void
 	sectionLength: number
 	kakariStart: number
@@ -233,6 +404,7 @@ export class RaceSolver {
 	temptationCount: number
 	pacer: RaceSolver | null
 	isPaceDown: boolean
+	paceDownEndReason: 'course-end' | 'pacer-gap' | 'section-limit' | 'speed-skill' | 'kakari' | null
 	posKeepMinThreshold: number
 	posKeepMaxThreshold: number
 	posKeepCooldown: Timer
@@ -260,6 +432,8 @@ export class RaceSolver {
 		pacer?: RaceSolver,
 		onSkillActivate?: (s: RaceSolver, skillId: string, perspective: Perspective) => void,
 		onSkillDeactivate?: (s: RaceSolver, skillId: string, perspective: Perspective) => void
+		rank?: number,
+		fieldSize?: number
 	}) {
 		// clone since green skills may modify the stat values
 		this.horse = Object.assign({}, params.horse);
@@ -267,9 +441,48 @@ export class RaceSolver {
 		this.hp = params.hp;
 		this.pacer = params.pacer || null;
 		this.rng = params.rng;
-		this.pendingSkills = params.skills.slice();  // copy since we remove from it
+		this.pendingSkills = params.skills.map(skill => ({...skill, preconditionFulfilled: skill.precondition == null}));
 		this.pendingRemoval = new Set();
 		this.usedSkills = new Set();
+		this.rank = params.rank || 1;
+		this.fieldSize = params.fieldSize || 1;
+		// Continue-rank conditions ignore the opening setup period. Initialize
+		// their bounds permissively until the first five seconds have elapsed.
+		this.bestFieldRank = this.fieldSize;
+		this.worstFieldRank = 1;
+		this.fieldRankHistoryStarted = false;
+		this.nearestAheadDistance = Infinity;
+		this.nearestBehindDistance = Infinity;
+		this.distanceFromLeader = 0;
+		this.distanceFromLast = 0;
+		this.fieldSpread = 0;
+		this.nearCount = 0;
+		this.visibleHorseCount = 0;
+		this.blockedFront = false;
+		this.lanePosition = 0;
+		this.laneTarget = 0;
+		this.laneSpeed = 0;
+		this.laneInitialized = false;
+		this.blockedFrontTime = 0;
+		this.blockedSideTime = 0;
+		this.blockedAllTime = 0;
+		this.infrontNearLaneTime = 0;
+		this.behindNearLaneTime = 0;
+		this.behindNearLaneTimeSet1 = 0;
+		this.isSurrounded = false;
+		this.hasOvertakeTarget = false;
+		this.overtakeTargetTime = 0;
+		this.overtakeTargetNoOrderUpTime = 0;
+		this.lastFieldRank = this.rank;
+		this.changeOrderOneTime = 0;
+		this.changeOrderUpMiddle = 0;
+		this.changeOrderUpEndAfter = 0;
+		this.changeOrderUpFinalCornerAfter = 0;
+		this.laneMovementType = 0;
+		this.sameStrategyCount = 1;
+		this.sameStrategyRate = 100;
+		this.popularityOneSameStrategy = this.horse.popularity == 1;
+		this.isBehindIn = false;
 		this.gorosiRng = new Rule30CARng(this.rng.int32());
 		this.paceEffectRng = new Rule30CARng(this.rng.int32());
 		this.timers = [];
@@ -289,6 +502,9 @@ export class RaceSolver {
 		this.activeTargetSpeedSkills = [];
 		this.activeCurrentSpeedSkills = [];
 		this.activeAccelSkills = [];
+		this.activeSkillEventSubscriptions = [];
+		this.raceEvents = [];
+		this.activatedPassiveSkills = new Set();
 		this.activateCount = [0,0,0];
 		this.activateCountHeal = 0;
 		this.activateCountLastFrame = 0;
@@ -296,6 +512,7 @@ export class RaceSolver {
 		this.onSkillDeactivate = params.onSkillDeactivate || noop;
 		this.sectionLength = this.course.distance / 24.0;
 		this.isPaceDown = false;
+		this.paceDownEndReason = null;
 		this.posKeepMinThreshold = PositionKeep.minThreshold(this.horse.strategy, this.course.distance);
 		this.posKeepMaxThreshold = PositionKeep.maxThreshold(this.horse.strategy, this.course.distance);
 		this.posKeepCooldown = this.getNewTimer();
@@ -485,18 +702,20 @@ export class RaceSolver {
 	}
 
 	updatePositionKeepNonNige() {
+		this.paceDownEndReason = null;
 		if (this.pos >= this.posKeepEnd) {
+			if (this.isPaceDown) this.paceDownEndReason = 'course-end';
 			this.isPaceDown = false;
 			this.posKeepSpeedCoef = 1.0;
 			this.updatePositionKeep = noop as any;
 		} else if (this.isPaceDown) {
-			if (
-			   this.pacer.pos - this.pos > this.posKeepEffectExitDistance
-			|| this.pos - this.posKeepEffectStart > this.sectionLength
-			|| this.activeTargetSpeedSkills.length > 0
-			|| this.activeCurrentSpeedSkills.length > 0
-			|| this.isKakari
-			) {
+			let reason: typeof this.paceDownEndReason = null;
+			if (this.pacer.pos - this.pos > this.posKeepEffectExitDistance) reason = 'pacer-gap';
+			else if (this.pos - this.posKeepEffectStart > this.sectionLength) reason = 'section-limit';
+			else if (this.activeTargetSpeedSkills.length > 0 || this.activeCurrentSpeedSkills.length > 0) reason = 'speed-skill';
+			else if (this.isKakari) reason = 'kakari';
+			if (reason != null) {
+				this.paceDownEndReason = reason;
 				this.isPaceDown = false;
 				this.posKeepCooldown.t = -3.0;
 				this.posKeepSpeedCoef = 1.0;
@@ -636,13 +855,16 @@ export class RaceSolver {
 		let activateCountThisFrame = 0;
 		for (let i = this.pendingSkills.length; --i >= 0;) {
 			const s = this.pendingSkills[i];
+			if (!s.preconditionFulfilled && s.preconditionRegions!.some(region => region.start <= this.pos && this.pos < region.end) && s.precondition!(this)) {
+				s.preconditionFulfilled = true;
+			}
 			if (this.pos >= s.trigger.end || this.pendingRemoval.has(s.skillId)) {  // NB. `Region`s are half-open [start,end) intervals. If pos == end we are out of the trigger.
 				// skill failed to activate
 				// FIXME removing from pendingSkills here means that 564 will never pick a skill that already passed its chance to activate
 				// (and failed) before 564 procced, which is wrong
 				this.pendingSkills.splice(i,1);
 				this.pendingRemoval.delete(s.skillId);
-			} else if (this.pos >= s.trigger.start && s.extraCondition(this)) {
+			} else if (this.pos >= s.trigger.start && s.preconditionFulfilled && s.extraCondition(this)) {
 				this.activateSkill(s);
 				this.pendingSkills.splice(i,1);
 				// TODO i don't exactly like hardcoding these; perhaps need some isRealSkill property on `PendingSkill` or move these mechanics out
@@ -653,79 +875,171 @@ export class RaceSolver {
 		this.activateCountLastFrame = activateCountThisFrame;
 	}
 
+	private isPassiveSkill(s: PendingSkill) {
+		return s.effects.some(ef => ef.type >= SkillType.SpeedUp && ef.type <= SkillType.WisdomUp);
+	}
+
+	private rickeyEffects(s: PendingSkill) {
+		// Copano Rickey: 0.25 velocity, then +0.05 velocity and acceleration
+		// for every passive that successfully activated at race start.  The
+		// extracted data only contains the former historical 0.45 approximation.
+		const passiveCount = this.activatedPassiveSkills.size;
+		const base = s.effects[0];
+		return [
+			{...base, type: SkillType.TargetSpeed, modifier: 0.25 + 0.05 * passiveCount},
+			{...base, type: SkillType.Accel, modifier: 0.05 * passiveCount}
+		];
+	}
+
+	private applySkillEffect(s: PendingSkill, ef: SkillEffect, durationTimer?: Timer) {
+		const scaledDuration = this.skillEffectDuration(s, ef);
+		const timer = durationTimer || this.getNewTimer(-scaledDuration);
+		switch (ef.type) {
+		case SkillType.Noop:
+			break;
+		case SkillType.SpeedUp:
+			this.horse.speed = Math.max(this.horse.speed + ef.modifier, 1);
+			break;
+		case SkillType.StaminaUp:
+			this.horse.stamina = Math.max(this.horse.stamina + ef.modifier, 1);
+			this.horse.rawStamina = Math.max(this.horse.rawStamina + ef.modifier, 1);
+			break;
+		case SkillType.PowerUp:
+			this.horse.power = Math.max(this.horse.power + ef.modifier, 1);
+			break;
+		case SkillType.GutsUp:
+			this.horse.guts = Math.max(this.horse.guts + ef.modifier, 1);
+			break;
+		case SkillType.WisdomUp:
+			this.horse.wisdom = Math.max(this.horse.wisdom + ef.modifier, 1);
+			break;
+		case SkillType.MultiplyStartDelay:
+			this.startDelay *= ef.modifier;
+			break;
+		case SkillType.ExtendKakari:
+			if (this.isKakari) this.kakariTimer.t -= ef.modifier;
+			break;
+		case SkillType.SetStartDelay:
+			this.startDelay = ef.modifier;
+			break;
+		case SkillType.TargetSpeed:
+			this.modifiers.targetSpeed.add(ef.modifier);
+			this.activeTargetSpeedSkills.push({skillId: s.skillId, perspective: s.perspective, durationTimer: timer, modifier: ef.modifier});
+			break;
+		case SkillType.ModifyKakariChance:
+			this.modifiers.kakariChance += ef.modifier / 100.0;
+			break;
+		case SkillType.Accel:
+			this.modifiers.accel.add(ef.modifier);
+			this.activeAccelSkills.push({skillId: s.skillId, perspective: s.perspective, durationTimer: timer, modifier: ef.modifier});
+			break;
+		case SkillType.CurrentSpeed:
+		case SkillType.CurrentSpeedWithNaturalDeceleration:
+			this.modifiers.currentSpeed.add(ef.modifier);
+			this.activeCurrentSpeedSkills.push({
+				skillId: s.skillId, perspective: s.perspective, durationTimer: timer, modifier: ef.modifier,
+				naturalDeceleration: ef.type == SkillType.CurrentSpeedWithNaturalDeceleration
+			});
+			break;
+		case SkillType.Recovery:
+			if (s.perspective == Perspective.Self) ++this.activateCountHeal;
+			this.hp.recover(ef.modifier);
+			if (this.phase >= 2 && !this.isLastSpurt) {
+				this.lastSpurtTransition = -1;
+				this.updateLastSpurtState();
+			}
+			break;
+		case SkillType.ActivateRandomGold:
+			this.doActivateRandomGold(ef.modifier);
+			break;
+		case SkillType.ExtendEvolvedDuration:
+			this.modifiers.specialSkillDurationScaling = ef.modifier;
+			break;
+		}
+	}
+
+	private skillEffectDuration(s: PendingSkill, ef: SkillEffect) {
+		const durationScaling = ef.durationScaling ?? 1;
+		let specialScaling = 1;
+		if (durationScaling == 3) {
+			// MultiplyRemainHp type 1: sampled once on activation, using absolute
+			// remaining HP (not the HP percentage used by hp_per conditions).
+			const hp = this.hp.remainingHp();
+			specialScaling = hp < 2000 ? 1.0 : hp < 2400 ? 1.5 : hp < 2600 ? 2.0
+				: hp < 2800 ? 2.2 : hp < 3000 ? 2.5 : hp < 3200 ? 3.0
+				: hp < 3500 ? 3.5 : 4.0;
+		}
+		return ef.baseDuration * (this.course.distance / 1000) * specialScaling *
+			(s.rarity == SkillRarity.Evolution ? this.modifiers.specialSkillDurationScaling : 1);
+	}
+
+	/**
+	 * Records a field event and delivers it only to skills active at that moment.
+	 * The retained history is intentionally separate: future activation conditions
+	 * can query prior events (for example, three passes before 10 s), whereas a
+	 * subscription can only react to events after its source skill activated.
+	 */
+	onRaceEvent(event: RaceEvent) {
+		const count = event.count || 1;
+		this.raceEvents.push({type: event.type, count, time: this.accumulatetime.t});
+		for (const active of this.activeSkillEventSubscriptions.slice()) {
+			if (active.rule.event != event.type) continue;
+			if (active.rule.matches != null && !active.rule.matches(event, active.skillId, active.perspective)) continue;
+			if (active.durationTimer.t >= 0) continue;
+			const remaining = Math.min(count, active.rule.maxTriggers - active.triggers);
+			for (let i = 0; i < remaining; ++i) {
+				// Extending the shared timer first makes the added effects last for
+				// the same remaining duration as the original skill.
+				if (active.rule.extendDurationByBase) active.durationTimer.t -= active.baseDuration;
+				const reactiveSkill: PendingSkill = {
+					skillId: active.skillId, perspective: active.perspective, rarity: SkillRarity.Unique,
+					trigger: new Region(0, 0), extraCondition: (_) => true, effects: active.effects
+				};
+				active.effects.forEach(effect => this.applySkillEffect(reactiveSkill, effect, active.durationTimer));
+				++active.triggers;
+			}
+		}
+	}
+
 	activateSkill(s: PendingSkill) {
+		const rule = ActiveSkillEventRules[s.skillId];
+		const selectedEffects = s.effectResolver?.(this) ?? s.effects;
+		const rawEffects = s.skillId == '109801111' ? this.rickeyEffects({...s, effects: selectedEffects}) : selectedEffects;
+		const effects = rule == null ? rawEffects : rule.initialEffects(rawEffects);
+		const sharedDuration = rule == null || effects.length == 0 ? undefined
+			: this.getNewTimer(-this.skillEffectDuration(s, effects[0]));
 		// sort so that the ExtendEvolvedDuration effect always activates after other effects, since it shouldn't extend the duration of other
 		// effects on the same skill
-		s.effects.sort((a,b) => +(a.type == 42) - +(b.type == 42)).forEach(ef => {
-			const scaledDuration = ef.baseDuration * (this.course.distance / 1000) *
-				(s.rarity == SkillRarity.Evolution ? this.modifiers.specialSkillDurationScaling : 1);  // TODO should probably be awakened skills
-				                                                                                       // and not just pinks
-			switch (ef.type) {
-			case SkillType.Noop:
-				break;
-			case SkillType.SpeedUp:
-				this.horse.speed = Math.max(this.horse.speed + ef.modifier, 1);
-				break;
-			case SkillType.StaminaUp:
-				this.horse.stamina = Math.max(this.horse.stamina + ef.modifier, 1);
-				this.horse.rawStamina = Math.max(this.horse.rawStamina + ef.modifier, 1);
-				break;
-			case SkillType.PowerUp:
-				this.horse.power = Math.max(this.horse.power + ef.modifier, 1);
-				break;
-			case SkillType.GutsUp:
-				this.horse.guts = Math.max(this.horse.guts + ef.modifier, 1);
-				break;
-			case SkillType.WisdomUp:
-				this.horse.wisdom = Math.max(this.horse.wisdom + ef.modifier, 1);
-				break;
-			case SkillType.MultiplyStartDelay:
-				this.startDelay *= ef.modifier;
-				break;
-			case SkillType.ExtendKakari:
-				if (this.isKakari) this.kakariTimer.t -= ef.modifier;
-				break;
-			case SkillType.SetStartDelay:
-				this.startDelay = ef.modifier;
-				break;
-			case SkillType.TargetSpeed:
-				this.modifiers.targetSpeed.add(ef.modifier);
-				this.activeTargetSpeedSkills.push({skillId: s.skillId, perspective: s.perspective, durationTimer: this.getNewTimer(-scaledDuration), modifier: ef.modifier});
-				break;
-			case SkillType.ModifyKakariChance:
-				this.modifiers.kakariChance += ef.modifier / 100.0;
-				break;
-			case SkillType.Accel:
-				this.modifiers.accel.add(ef.modifier);
-				this.activeAccelSkills.push({skillId: s.skillId, perspective: s.perspective, durationTimer: this.getNewTimer(-scaledDuration), modifier: ef.modifier});
-				break;
-			case SkillType.CurrentSpeed:
-			case SkillType.CurrentSpeedWithNaturalDeceleration:
-				this.modifiers.currentSpeed.add(ef.modifier);
-				this.activeCurrentSpeedSkills.push({
-					skillId: s.skillId, perspective: s.perspective, durationTimer: this.getNewTimer(-scaledDuration), modifier: ef.modifier,
-					naturalDeceleration: ef.type == SkillType.CurrentSpeedWithNaturalDeceleration
-				});
-				break;
-			case SkillType.Recovery:
-				if (s.perspective == Perspective.Self) ++this.activateCountHeal;
-				this.hp.recover(ef.modifier);
-				if (this.phase >= 2 && !this.isLastSpurt) {
-					this.lastSpurtTransition = -1;  // reset
-					this.updateLastSpurtState();
-				}
-				break;
-			case SkillType.ActivateRandomGold:
-				this.doActivateRandomGold(ef.modifier);
-				break;
-			case SkillType.ExtendEvolvedDuration:
-				this.modifiers.specialSkillDurationScaling = ef.modifier;
-				break;
-			}
-		});
+		effects.slice().sort((a,b) => +(a.type == 42) - +(b.type == 42))
+			.forEach(ef => this.applySkillEffect(s, ef, sharedDuration));
+		if (this.isPassiveSkill(s)) this.activatedPassiveSkills.add(s.skillId);
+		if (rule != null && sharedDuration != null) {
+			this.activeSkillEventSubscriptions.push({
+				skillId: s.skillId, perspective: s.perspective, rule, durationTimer: sharedDuration,
+				baseDuration: this.skillEffectDuration(s, effects[0]), triggers: 0,
+				effects: rule.effectsPerTrigger(rawEffects)
+			});
+		}
 		if (s.perspective == Perspective.Self) ++this.activateCount[this.phase];
 		this.usedSkills.add(s.skillId);
-		this.onSkillActivate(this, s.skillId, s.perspective);
+		this.onSkillActivate(this, s.skillId, s.perspective, s);
+		// This is intentionally emitted after the source skill is fully active.
+		// Subscriptions can therefore react to any kind of later skill effect
+		// without being coupled to field-only events such as overtakes.
+		this.onRaceEvent({type: 'skillActivated', skillId: s.skillId, perspective: s.perspective});
+	}
+
+	applyExternalSkill(skillId: string, rarity: SkillRarity, effects: SkillEffect[]) {
+		if (effects.length == 0) return;
+		const previouslyUsed = this.usedSkills.has(skillId);
+		const callback = this.onSkillActivate;
+		this.onSkillActivate = noop;
+		this.activateSkill({
+			skillId, rarity, perspective: Perspective.Other,
+			trigger: new Region(0, 0), extraCondition: (_) => true, effects
+		});
+		this.onSkillActivate = callback;
+		if (!previouslyUsed) this.usedSkills.delete(skillId);
 	}
 
 	doActivateRandomGold(ngolds: number) {

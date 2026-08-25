@@ -15,5 +15,6 @@ export interface RaceParameters {
 	readonly popularity: number
 	readonly orderRange?: [number, number]
 	readonly numUmas?: number
+	readonly rankAware?: boolean
 	readonly skillId: string
 }
