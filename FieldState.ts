@@ -121,6 +121,11 @@ export function updateLongitudinalFieldState(runners: RaceSolver[], dt: number, 
 	const ordered = runners.slice().sort((a, b) => b.pos - a.pos || a.rank - b.rank);
 	const leaderPos = ordered[0].pos;
 	const lastPos = ordered[ordered.length - 1].pos;
+	// Keep directed relationships while evaluating the field.  `is_overtake`
+	// and `overtake_target_no_order_up_time` describe the pursuer's outgoing
+	// target, whereas `overtake_target_time` describes the target's incoming
+	// pressure.  The latter is tracked per pursuer so a handoff from one
+	// pursuer to another cannot falsely satisfy a continuous-time condition.
 	for (let index = 0; index < ordered.length; ++index) {
 		const runner = ordered[index];
 		const previousRank = runner.lastFieldRank > 0 ? runner.lastFieldRank : runner.rank;
@@ -205,17 +210,41 @@ export function updateLongitudinalFieldState(runners: RaceSolver[], dt: number, 
 		runner.behindNearLaneTimeSet1 = continueTimer(runner.behindNearLaneTimeSet1, behindGap < 5 && behindSameLane, dt);
 		runner.isSurrounded = aheadGap < 3 && behindGap < 3 && runner.nearCount >= 3;
 
-		const overtakeTarget = ordered.slice(0, index).some(other => {
+		const overtakeTargets = ordered.slice(0, index).filter(other => {
 			const gap = other.pos - runner.pos;
 			if (runner.blockedFront && other == frontBlocker) return true;
 			const speedGap = runner.currentSpeed - other.currentSpeed;
-			return gap >= 1 && gap <= 20 && speedGap > 0 && gap / speedGap < 15 && runner.targetSpeed > other.targetSpeed;
+			const targetSpeedAdvantage = runner.targetSpeed > other.targetSpeed
+				|| (other.blockedFront && runner.targetSpeed > other.currentSpeed);
+			return gap >= 1 && gap <= 20 && speedGap > 0 && gap / speedGap < 15 && targetSpeedAdvantage;
 		});
+		const overtakeTarget = overtakeTargets.length > 0;
+		// A pursuer may have multiple valid targets.  Each relationship gets its
+		// own timer; relationships not present this frame are reset by removal.
+		const targetTimers = runner.overtakeTargetTimers ??= new Map<RaceSolver, number>();
+		const currentTargets = new Set(overtakeTargets);
+		for (const target of targetTimers.keys()) {
+			if (!currentTargets.has(target)) targetTimers.delete(target);
+		}
+		for (const target of currentTargets) {
+			targetTimers.set(target, (targetTimers.get(target) ?? 0) + dt);
+		}
 		runner.hasOvertakeTarget = overtakeTarget;
-		runner.overtakeTargetTime = continueTimer(runner.overtakeTargetTime, overtakeTarget, dt);
 		runner.overtakeTargetNoOrderUpTime = continueTimer(runner.overtakeTargetNoOrderUpTime, overtakeTarget && !rankChanged, dt);
 		runner.lastFieldRank = runner.rank;
 	}
+	// A target's timer is the longest currently-continuous relationship from
+	// any pursuer behind it.  This keeps simultaneous pursuers valid while
+	// requiring at least one individual pursuer to remain a targeter for the
+	// full threshold.
+	runners.forEach(runner => {
+		let longest = 0;
+		for (const pursuer of runners) {
+			const duration = pursuer.overtakeTargetTimers?.get(runner) ?? 0;
+			if (duration > longest) longest = duration;
+		}
+		runner.overtakeTargetTime = longest;
+	});
 	if (useLanes) runners.forEach(runner => updateLaneMovement(runner, runners, dt));
 	else runners.forEach(runner => { runner.laneMovementType = 0; });
 	return runners;

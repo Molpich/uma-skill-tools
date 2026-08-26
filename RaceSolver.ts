@@ -338,6 +338,8 @@ export class RaceSolver {
 	hasOvertakeTarget: boolean
 	overtakeTargetTime: number
 	overtakeTargetNoOrderUpTime: number
+	/** Continuous duration of each directed pursuer -> overtake-target relationship. */
+	overtakeTargetTimers: Map<RaceSolver, number>
 	lastFieldRank: number
 	changeOrderOneTime: number
 	changeOrderUpMiddle: number
@@ -473,6 +475,7 @@ export class RaceSolver {
 		this.hasOvertakeTarget = false;
 		this.overtakeTargetTime = 0;
 		this.overtakeTargetNoOrderUpTime = 0;
+		this.overtakeTargetTimers = new Map();
 		this.lastFieldRank = this.rank;
 		this.changeOrderOneTime = 0;
 		this.changeOrderUpMiddle = 0;
